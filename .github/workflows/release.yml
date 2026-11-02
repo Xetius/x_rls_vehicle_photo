@@ -1,0 +1,34 @@
+name: Release
+
+# Push a tag such as v0.0.1 (or 0.0.1) to build x_rls_vehicle_photo_0.0.1.zip and publish it as a GitHub release.
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build mod zip
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          zip_name="x_rls_vehicle_photo_${version}.zip"
+          # Only the mod's own files, at the root of the zip as BeamNG expects.
+          zip -r "$zip_name" README.txt lua scripts ui x_rls_vehicle_photo
+          unzip -l "$zip_name"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP_NAME" \
+            --title "x_rls_vehicle_photo ${GITHUB_REF_NAME#v}" \
+            --generate-notes
