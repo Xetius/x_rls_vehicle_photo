@@ -23,6 +23,9 @@ Create <BeamNG user folder>/settings/x_rls_vehicle_photo/config.json with any of
     "width": 640, "height": 360,
     "fov": 40,
     "cameraDistance": 1.25,   1 = tight framing; higher = more space around the vehicle
+    "cameraPitch": 0,         degrees to raise the camera (e.g. 10 = looking down more); negative lowers it
+    "frameShiftUp": 0,        move the vehicle up in the picture (0.1 = a touch); negative moves it down
+    "frameShiftRight": 0,     move the vehicle right in the picture; negative moves it left
     "manualEV": null,         a number fixes the exposure if photos come out too dark/bright
     "backdropReach": 20,      how far away the studio wall is, in camera distances
     "backdropHeight": 3,      raise if sky shows at the top of photos

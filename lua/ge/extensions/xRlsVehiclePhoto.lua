@@ -17,6 +17,9 @@ local defaults = {
   height = 360,
   fov = 40,
   cameraDistance = 1.25, -- 1 = the game's tight framing; higher pulls back for room around the vehicle
+  cameraPitch = 0,       -- degrees to raise the camera above the game's angle; negative lowers it
+  frameShiftUp = 0,      -- move the vehicle up in the picture, as a fraction of its height (0.1 = a touch)
+  frameShiftRight = 0,   -- move the vehicle right in the picture, as a fraction of its width
   nearPlane = 0.1,
   studioHeight = 1500,   -- metres above the camera where the studio is built
   useBackdrop = true,    -- false: plain sky behind the car
@@ -312,6 +315,33 @@ local function createBackdrop(pos, scale)
   return obj
 end
 
+-- Slide the camera sideways and up/down (not turning it) until the vehicle's box sits in the middle of the
+-- picture. Aiming at the box centre isn't enough: the near end looks bigger, so it ends up cut off.
+local function centerFraming(subject, camPosition, camRotation)
+  local bb = subject:getSpawnWorldOOBB()
+  local corners = {}
+  for i = 0, 7 do corners[i + 1] = vec3(bb:getPoint(i)) end
+  local rot = quat(camRotation)
+  local forward, right, up = rot * vec3(0, 1, 0), rot * vec3(1, 0, 0), rot * vec3(0, 0, 1)
+  local pos = vec3(camPosition)
+  for _ = 1, 6 do
+    local uMin, uMax, vMin, vMax = math.huge, -math.huge, math.huge, -math.huge
+    for _, corner in ipairs(corners) do
+      local rel = corner - pos
+      local depth = rel:dot(forward)
+      if depth <= 0.01 then return camPosition end -- camera inside the box; leave it alone
+      local u, v = rel:dot(right) / depth, rel:dot(up) / depth
+      uMin, uMax, vMin, vMax = math.min(uMin, u), math.max(uMax, u), math.min(vMin, v), math.max(vMax, v)
+    end
+    -- The shifts are fractions of the vehicle's size in the picture, so they look the same for any vehicle.
+    local uTarget = (cfg.frameShiftRight or 0) * (uMax - uMin)
+    local vTarget = (cfg.frameShiftUp or 0) * (vMax - vMin)
+    local depth = (vec3(bb:getCenter()) - pos):dot(forward)
+    pos = pos + right * (((uMin + uMax) / 2 - uTarget) * depth) + up * (((vMin + vMax) / 2 - vTarget) * depth)
+  end
+  return pos
+end
+
 local function lowestPoint(veh)
   local ok, z = pcall(function()
     local bb = veh:getSpawnWorldOOBB()
@@ -462,6 +492,21 @@ local function runPhoto(job, inventoryId, record, config, liveVehId)
       subject, cfg.fov, cfg.nearPlane, cfg.width / cfg.height, {cfg.width, cfg.height})
     if not camPosition then message = 'Could not frame the vehicle'; return end
 
+    -- Swing the camera up (or down) around the vehicle, keeping its distance, and aim back at the vehicle.
+    if cfg.cameraPitch and cfg.cameraPitch ~= 0 then
+      local ok, pos, rot = pcall(function()
+        local center = vec3(subject:getSpawnWorldOOBB():getCenter())
+        local offset = vec3(camPosition) - center
+        local flat = vec3(offset.x, offset.y, 0)
+        local radius = offset:length()
+        local elevation = math.atan2(offset.z, flat:length()) + math.rad(cfg.cameraPitch)
+        elevation = math.max(math.rad(-10), math.min(math.rad(85), elevation))
+        local moved = center + flat:normalized() * (radius * math.cos(elevation)) + vec3(0, 0, radius * math.sin(elevation))
+        return moved, quatFromDir(center - moved, vec3(0, 0, 1))
+      end)
+      if ok and pos then camPosition, camRotation = pos, rot else log('W', logTag, 'Could not raise the camera: ' .. tostring(pos)) end
+    end
+
     -- Pull back along the line of sight for some room around the vehicle; the aim stays the same.
     if cfg.cameraDistance and cfg.cameraDistance ~= 1 then
       local ok, moved = pcall(function()
@@ -471,6 +516,9 @@ local function runPhoto(job, inventoryId, record, config, liveVehId)
       end)
       if ok and moved then camPosition = moved else log('W', logTag, 'Could not move the camera back: ' .. tostring(moved)) end
     end
+
+    local centered, centeredPos = pcall(centerFraming, subject, camPosition, camRotation)
+    if centered and centeredPos then camPosition = centeredPos else log('W', logTag, 'Could not centre the vehicle: ' .. tostring(centeredPos)) end
 
     -- The backdrop comes after framing: its size depends on how far back the camera ended up.
     if clone then
