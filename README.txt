@@ -1,9 +1,14 @@
 RLS Vehicle Photo
 =================
 
-Adds "New image" to the vehicle menu on RLS Career Overhaul's My Vehicles page.
-Click (or right-click) a vehicle, choose "New image", and a fresh photo of the car as it is now
-replaces its picture.
+Adds "New image" and "Photo studio..." to the vehicle menu on RLS Career Overhaul's My Vehicles page.
+Click (or right-click) a vehicle, then:
+- "New image": a fresh photo of the car as it is now replaces its picture, using your saved framing.
+- "Photo studio...": opens a panel with a live preview and sliders for distance, rotation, camera
+  height, position in the picture and lens. "Take photo" saves the picture; with "Use these settings
+  for all photos" ticked, the framing also becomes the default for "New image". Reset goes back to
+  the settings the panel opened with, Mod defaults to the built-in ones, and a double-click resets
+  one slider. Esc or Cancel closes it without a photo.
 
 How it works
 - A temporary copy of the car is spawned in a studio bowl (the stock showroom backdrop) high above
@@ -15,11 +20,12 @@ How it works
 - The copy is undamaged even if your car is damaged.
 
 Options
-Create <BeamNG user folder>/settings/x_rls_vehicle_photo/config.json with any of:
+The photo studio saves the framing settings for you. Everything can also be set by hand in
+<BeamNG user folder>/settings/x_rls_vehicle_photo/config.json, with any of:
   {
     "useBackdrop": true,      false = sky behind the car instead of the studio
     "forceDaylight": true,    false = keep the current time of day
-    "yawDegrees": 0,          turn the car in the studio
+    "yawDegrees": 0,          turn the car in the studio (-180 to 180)
     "width": 640, "height": 360,
     "fov": 40,
     "cameraDistance": 1.25,   1 = tight framing; higher = more space around the vehicle

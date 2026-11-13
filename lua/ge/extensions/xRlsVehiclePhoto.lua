@@ -1,5 +1,5 @@
 -- RLS Vehicle Photo
--- Adds "New image" to RLS Career Overhaul's My Vehicles menu. A temporary copy of the car is spawned
+-- Adds "New image" and "Photo studio..." to RLS Career Overhaul's My Vehicles menu. A temporary copy of the car is spawned
 -- in a studio bowl high above the map (the stock showroom backdrop), photographed off-screen, then
 -- removed. The photo is kept per career profile and takes priority over RLS's own thumbnail choice.
 local M = {}
@@ -28,15 +28,15 @@ local defaults = {
   daylightTime = 0.06,   -- BeamNG time of day: 0 is noon, 0.5 is midnight
   settleSeconds = 1.5,   -- wait for the copy to finish loading meshes and textures
   screenshotDelay = 0.6,
+  previewDelay = 0.3,    -- the same wait for studio previews; shorter keeps the sliders responsive
   manualEV = nil,        -- fixed exposure; nil copies the game's current exposure
   backdropReach = 20,    -- keep the studio wall this many camera-distances away
   backdropHeight = 3,    -- stretch the studio walls upward; raise if sky shows at the top of photos
   shadowSoftness = 0.8,  -- sun shadow blur during the shot (levels use ~0.2); false leaves it alone
-  yawDegrees = 0,        -- turn the car in the studio
+  yawDegrees = 0,        -- turn the car in the studio (the camera walks round it the other way)
 }
 
 local cfg
-local busy = false
 
 local function loadConfig()
   cfg = deepcopy(defaults)
@@ -317,7 +317,7 @@ end
 
 -- Slide the camera sideways and up/down (not turning it) until the vehicle's box sits in the middle of the
 -- picture. Aiming at the box centre isn't enough: the near end looks bigger, so it ends up cut off.
-local function centerFraming(subject, camPosition, camRotation)
+local function centerFraming(subject, camPosition, camRotation, shot)
   local bb = subject:getSpawnWorldOOBB()
   local corners = {}
   for i = 0, 7 do corners[i + 1] = vec3(bb:getPoint(i)) end
@@ -334,8 +334,8 @@ local function centerFraming(subject, camPosition, camRotation)
       uMin, uMax, vMin, vMax = math.min(uMin, u), math.max(uMax, u), math.min(vMin, v), math.max(vMax, v)
     end
     -- The shifts are fractions of the vehicle's size in the picture, so they look the same for any vehicle.
-    local uTarget = (cfg.frameShiftRight or 0) * (uMax - uMin)
-    local vTarget = (cfg.frameShiftUp or 0) * (vMax - vMin)
+    local uTarget = shot.frameShiftRight * (uMax - uMin)
+    local vTarget = shot.frameShiftUp * (vMax - vMin)
     local depth = (vec3(bb:getCenter()) - pos):dot(forward)
     pos = pos + right * (((uMin + uMax) / 2 - uTarget) * depth) + up * (((vMin + vMax) / 2 - vTarget) * depth)
   end
@@ -374,7 +374,7 @@ end
 -- Render view capture --------------------------------------------------------------------------------
 -- An off-screen view: the player's camera, UI and graphics settings are left alone.
 
-local function capture(job, filename, camera)
+local function capture(job, filename, camera, fov, delay)
   local view = RenderViewManagerInstance:getOrCreateView('xRlsVehiclePhoto')
   local ok, result = pcall(function()
     view.luaOwned = true
@@ -386,8 +386,8 @@ local function capture(job, filename, camera)
     view.resolution = Point2I(cfg.width, cfg.height)
     view.viewPort = RectI(0, 0, cfg.width, cfg.height)
     view.namedTexTargetColor = 'xRlsVehiclePhoto'
-    view.frustum = Frustum.construct(false, math.rad(cfg.fov), cfg.width / cfg.height, cfg.nearPlane, 2000)
-    view.fov = cfg.fov
+    view.frustum = Frustum.construct(false, math.rad(fov), cfg.width / cfg.height, cfg.nearPlane, 2000)
+    view.fov = fov
     view.renderEditorIcons = false
     if cfg.manualEV then
       view.useManualEV = true
@@ -399,7 +399,7 @@ local function capture(job, filename, camera)
       if view.useManualEV then view.manualEV = exposure.manualEV
       elseif main and main.currentExposure then view.currentExposure = main.currentExposure end
     end
-    job.sleep(cfg.screenshotDelay)
+    job.sleep(delay)
     local temporary = filename .. '.tmp.png'
     if not view:saveToDisk(temporary) then return false end
     local bitmap = GBitmap()
@@ -412,6 +412,59 @@ local function capture(job, filename, camera)
   pcall(function() RenderViewManagerInstance:destroyView(view) end)
   if not ok then log('E', logTag, 'Capture failed: ' .. tostring(result)) end
   return ok and result
+end
+
+-- Framing --------------------------------------------------------------------------------------------
+
+-- What the studio panel can change, with the range each is kept in. The rest only comes from the config.
+local shotKeys = {
+  fov = {10, 90},
+  cameraDistance = {0.5, 3},
+  cameraPitch = {-30, 60},
+  yawDegrees = {-180, 180},
+  frameShiftUp = {-0.5, 0.5},
+  frameShiftRight = {-0.5, 0.5},
+}
+
+local function shotSettings(overrides)
+  local shot = {}
+  for key, range in pairs(shotKeys) do
+    local value = tonumber(type(overrides) == 'table' and overrides[key]) or tonumber(cfg[key]) or defaults[key]
+    shot[key] = math.max(range[1], math.min(range[2], value))
+  end
+  return shot
+end
+
+-- Where the camera goes for these settings.
+local function frameShot(subject, shot)
+  if not util_screenshotCreator then extensions.load('util_screenshotCreator') end
+  local camPosition = util_screenshotCreator.frameVehicle(
+    subject, shot.fov, cfg.nearPlane, cfg.width / cfg.height, {cfg.width, cfg.height})
+  if not camPosition then return nil end
+  -- Walk the camera round the vehicle (turning the car one way looks the same as walking round it the
+  -- other way) and up or down, at cameraDistance times the game's distance, aimed back at the vehicle.
+  local center = vec3(subject:getSpawnWorldOOBB():getCenter())
+  local offset = vec3(camPosition) - center
+  local radius = offset:length() * shot.cameraDistance
+  local azimuth = math.atan2(offset.y, offset.x) - math.rad(shot.yawDegrees)
+  local elevation = math.atan2(offset.z, math.sqrt(offset.x * offset.x + offset.y * offset.y)) + math.rad(shot.cameraPitch)
+  elevation = math.max(math.rad(-10), math.min(math.rad(85), elevation))
+  local pos = center + vec3(math.cos(azimuth) * math.cos(elevation), math.sin(azimuth) * math.cos(elevation), math.sin(elevation)) * radius
+  local rot = quatFromDir(center - pos, vec3(0, 0, 1))
+  local centered, centeredPos = pcall(centerFraming, subject, pos, rot, shot)
+  if centered and centeredPos then pos = centeredPos else log('W', logTag, 'Could not centre the vehicle: ' .. tostring(centeredPos)) end
+  return pos, rot
+end
+
+local function saveShotDefaults(shot)
+  local saved = FS:fileExists(configFile) and jsonReadFile(configFile)
+  if type(saved) ~= 'table' then saved = {} end
+  for key in pairs(shotKeys) do
+    saved[key] = shot[key]
+    cfg[key] = shot[key]
+  end
+  FS:directoryCreate(configFile:match('^(.*/)'), true)
+  jsonWriteFile(configFile, saved, true)
 end
 
 -- Photo job ------------------------------------------------------------------------------------------
@@ -442,29 +495,65 @@ local function finishPhoto(inventoryId, model, dir, takenAt, success, message)
   guihooks.trigger('XRlsVehiclePhotoDone', {inventoryId = inventoryId, success = success})
 end
 
-local function runPhoto(job, inventoryId, record, config, liveVehId)
+-- One studio at a time: a copy of the car in the bowl, kept while the studio panel is open so each
+-- preview only needs a new camera position. "New image" opens it and shoots straight away.
+local studio
+local previewDir = '/settings/x_rls_vehicle_photo/preview/'
+local studioIdleSeconds = 300 -- close a studio nobody has touched for this long (panel lost, game menu left)
+
+local function studioEvent(data)
+  data.inventoryId = studio and studio.inventoryId
+  guihooks.trigger('XRlsVehiclePhotoStudio', data)
+end
+
+-- The bowl only needs rebuilding when the camera moves well out of (or far inside) the size it was made for.
+local function placeBackdrop(s, camPosition)
+  if not s.clone then return false end
+  local scale = backdropScale(s.clone, camPosition)
+  if s.backdrop and scale <= s.backdropScale and scale >= s.backdropScale / 2 then return false end
+  if s.backdrop then pcall(function() s.backdrop:delete() end) end
+  s.backdropScale = scale * 1.25
+  log('I', logTag, string.format('Backdrop scale %.2f', s.backdropScale))
+  local pos = s.clone:getPosition()
+  s.backdrop = createBackdrop(vec3(pos.x, pos.y, lowestPoint(s.clone) - 0.01), s.backdropScale)
+  return true
+end
+
+local function shoot(job, s, shot, filename, delay)
+  local pos, rot = frameShot(s.subject, shot)
+  if not pos then return false end
+  if placeBackdrop(s, pos) then job.sleep(0.3) end
+  return capture(job, filename, {pos = pos, rot = rot}, shot.fov, delay)
+end
+
+local function clearPreviews()
+  pcall(function()
+    for _, file in ipairs(FS:findFiles(previewDir, '*.jpg', 0, false, false) or {}) do FS:removeFile(file) end
+  end)
+end
+
+local function runStudio(job, s)
   local dir = profileDir()
   FS:directoryCreate(dir, true)
-  local takenAt = os.time()
-  local filename = dir .. photoFileName(inventoryId, takenAt)
-
+  FS:directoryCreate(previewDir, true)
+  clearPreviews()
   local physicsWasRunning = be:getPhysicsRunning()
-  local savedTime, savedShadows, clone, backdrop
-  local success, message = false, nil
+  local savedTime, savedShadows
+  local success, message, takenAt = false, nil, nil
 
   local ok, problem = pcall(function()
     local camPos = core_camera.getPosition()
-    local studio = vec3(camPos.x, camPos.y, camPos.z + cfg.studioHeight)
+    local studioPos = vec3(camPos.x, camPos.y, camPos.z + cfg.studioHeight)
 
     savedTime = borrowDaylight()
     savedShadows = softenShadows()
     -- Frozen physics keeps the copy where it spawned; the floor is fitted to it afterwards.
     be:setPhysicsRunning(false)
     core_vehicle_manager.queueAdditionalVehicleData({spawnWithEngineRunning = false})
-    clone = core_vehicles.spawnNewVehicle(record.model, {
-      config = config,
-      pos = studio,
-      rot = quatFromEuler(0, 0, math.rad(cfg.yawDegrees or 0)),
+    s.clone = core_vehicles.spawnNewVehicle(s.record.model, {
+      config = s.config,
+      pos = studioPos,
+      rot = quatFromEuler(0, 0, 0),
       autoEnterVehicle = false,
       canSpawnAnotherVehicleCheck = false,
       cling = false, -- no ground snap: the ground is far below the studio
@@ -478,83 +567,83 @@ local function runPhoto(job, inventoryId, record, config, liveVehId)
       waited = waited + 0.1
     end
 
-    log('I', logTag, 'Copy spawned: ' .. tostring(clone and clone:getID()))
-    local subject = clone
-    if not subject then
+    log('I', logTag, 'Copy spawned: ' .. tostring(s.clone and s.clone:getID()))
+    s.subject = s.clone
+    if not s.subject then
       -- No copy (spawn failed): photograph the real car where it stands, if it is out.
-      subject = liveVehId and getObjectByID(liveVehId)
-      if not subject then message = 'Could not spawn a copy of this vehicle for its photo'; return end
+      s.subject = s.liveVehId and getObjectByID(s.liveVehId)
+      if not s.subject then message = 'Could not spawn a copy of this vehicle for its photo'; return end
       log('W', logTag, 'Copy spawn failed, photographing the vehicle in place')
     end
 
-    if not util_screenshotCreator then extensions.load('util_screenshotCreator') end
-    local camPosition, camRotation = util_screenshotCreator.frameVehicle(
-      subject, cfg.fov, cfg.nearPlane, cfg.width / cfg.height, {cfg.width, cfg.height})
-    if not camPosition then message = 'Could not frame the vehicle'; return end
-
-    -- Swing the camera up (or down) around the vehicle, keeping its distance, and aim back at the vehicle.
-    if cfg.cameraPitch and cfg.cameraPitch ~= 0 then
-      local ok, pos, rot = pcall(function()
-        local center = vec3(subject:getSpawnWorldOOBB():getCenter())
-        local offset = vec3(camPosition) - center
-        local flat = vec3(offset.x, offset.y, 0)
-        local radius = offset:length()
-        local elevation = math.atan2(offset.z, flat:length()) + math.rad(cfg.cameraPitch)
-        elevation = math.max(math.rad(-10), math.min(math.rad(85), elevation))
-        local moved = center + flat:normalized() * (radius * math.cos(elevation)) + vec3(0, 0, radius * math.sin(elevation))
-        return moved, quatFromDir(center - moved, vec3(0, 0, 1))
-      end)
-      if ok and pos then camPosition, camRotation = pos, rot else log('W', logTag, 'Could not raise the camera: ' .. tostring(pos)) end
+    if s.interactive and not s.action then
+      studioEvent({state = 'ready', settings = shotSettings(), defaults = shotSettings(defaults)})
+      s.pending = s.pending or shotSettings()
     end
 
-    -- Pull back along the line of sight for some room around the vehicle; the aim stays the same.
-    if cfg.cameraDistance and cfg.cameraDistance ~= 1 then
-      local ok, moved = pcall(function()
-        local forward = quat(camRotation) * vec3(0, 1, 0)
-        local distance = (vec3(camPosition) - vec3(subject:getSpawnWorldOOBB():getCenter())):length()
-        return vec3(camPosition) - forward * (distance * (cfg.cameraDistance - 1))
-      end)
-      if ok and moved then camPosition = moved else log('W', logTag, 'Could not move the camera back: ' .. tostring(moved)) end
+    -- Studio panel open: render whatever settings it sent last, until it shoots or closes.
+    local previewFile
+    while not s.action do
+      if os.time() - s.lastActivity > studioIdleSeconds then
+        log('W', logTag, 'Photo studio left idle, closing it')
+        s.action = 'cancel'
+        break
+      end
+      be:setPhysicsRunning(false)
+      local shot = s.pending
+      if shot then
+        s.pending = nil
+        s.previewCount = (s.previewCount or 0) + 1
+        -- A new name each time, so the UI never shows a cached older preview.
+        local file = string.format('%spreview_%d_%d.jpg', previewDir, os.time(), s.previewCount)
+        local rendered, result = pcall(shoot, job, s, shot, file, cfg.previewDelay)
+        if rendered and result then
+          if previewFile then FS:removeFile(previewFile) end
+          previewFile = file
+          studioEvent({state = 'preview', file = file})
+        else
+          log('W', logTag, 'Preview failed: ' .. tostring(result))
+          studioEvent({state = 'preview', error = 'Could not render the preview'})
+        end
+      else
+        job.sleep(0.05)
+      end
     end
+    if previewFile then FS:removeFile(previewFile) end
 
-    local centered, centeredPos = pcall(centerFraming, subject, camPosition, camRotation)
-    if centered and centeredPos then camPosition = centeredPos else log('W', logTag, 'Could not centre the vehicle: ' .. tostring(centeredPos)) end
-
-    -- The backdrop comes after framing: its size depends on how far back the camera ended up.
-    if clone then
-      local pos = clone:getPosition()
-      local scale = backdropScale(clone, camPosition)
-      log('I', logTag, string.format('Backdrop scale %.2f', scale))
-      backdrop = createBackdrop(vec3(pos.x, pos.y, lowestPoint(clone) - 0.01), scale)
-      job.sleep(0.3)
+    if s.action == 'shoot' then
+      takenAt = os.time()
+      log('I', logTag, 'Capturing')
+      success = shoot(job, s, s.shot or shotSettings(), dir .. photoFileName(s.inventoryId, takenAt), cfg.screenshotDelay)
+      log('I', logTag, 'Capture finished: ' .. tostring(success))
     end
-
-    log('I', logTag, 'Capturing')
-    success = capture(job, filename, {pos = camPosition, rot = camRotation})
-    log('I', logTag, 'Capture finished: ' .. tostring(success))
   end)
   if not ok then log('E', logTag, tostring(problem)) end
 
-  if clone then pcall(function() clone:delete() end) end
-  if backdrop then pcall(function() backdrop:delete() end) end
+  if s.clone then pcall(function() s.clone:delete() end) end
+  if s.backdrop then pcall(function() s.backdrop:delete() end) end
   if savedTime then pcall(core_environment.setTimeOfDay, {time = savedTime}) end
   restoreShadows(savedShadows)
   be:setPhysicsRunning(physicsWasRunning)
-  busy = false
+  if studio == s then studio = nil end
 
-  finishPhoto(inventoryId, record.model, dir, takenAt, ok and success, message)
+  if s.action == 'cancel' then
+    guihooks.trigger('XRlsVehiclePhotoDone', {inventoryId = s.inventoryId, success = false, cancelled = true})
+  else
+    finishPhoto(s.inventoryId, s.record.model, dir, takenAt, ok and success, message)
+  end
 end
 
 -- Public API -----------------------------------------------------------------------------------------
 
-local function takePhoto(inventoryId)
+local function startStudio(inventoryId, interactive)
   inventoryId = tonumber(inventoryId) or inventoryId
-  -- A photo job that died without finishing must not block every later one.
-  if busy and os.clock() - busy > 30 then
+  -- A studio job that died without finishing must not block every later one.
+  if studio and os.time() - studio.lastActivity > studioIdleSeconds + 60 then
     log('W', logTag, 'Previous photo never finished, starting over')
-    busy = false
+    studio = nil
   end
-  if busy then notify('Already taking a photo, one moment'); return false end
+  if studio then notify('Already taking a photo, one moment'); return false end
   if not inventory() then notify('Vehicle photos only work in an RLS career', 'error'); return false end
   patchInventory()
   if not profileDir() then notify('No career profile loaded', 'error'); return false end
@@ -569,9 +658,49 @@ local function takePhoto(inventoryId)
   if not config then notify('This vehicle has no saved configuration', 'error'); return false end
 
   loadConfig()
-  busy = os.clock()
-  notify('Taking vehicle photo...')
-  core_jobsystem.create(function(job) runPhoto(job, inventoryId, record, config, liveVehId) end)
+  local s = {
+    inventoryId = inventoryId, record = record, config = config, liveVehId = liveVehId,
+    interactive = interactive, lastActivity = os.time(),
+  }
+  if not interactive then s.action, s.shot = 'shoot', shotSettings() end
+  studio = s
+  notify(interactive and 'Setting up the photo studio...' or 'Taking vehicle photo...')
+  core_jobsystem.create(function(job) runStudio(job, s) end)
+  return true
+end
+
+local function takePhoto(inventoryId)
+  return startStudio(inventoryId, false)
+end
+
+local function openStudio(inventoryId)
+  return startStudio(inventoryId, true)
+end
+
+-- The panel sends its settings as JSON text.
+local function decodeSettings(text)
+  local ok, value = pcall(jsonDecode, text)
+  return ok and type(value) == 'table' and value or {}
+end
+
+local function studioPreview(settingsJson)
+  if not studio or studio.action then return false end
+  studio.pending = shotSettings(decodeSettings(settingsJson))
+  studio.lastActivity = os.time()
+  return true
+end
+
+local function studioShoot(settingsJson, saveAsDefault)
+  if not studio or studio.action then return false end
+  local shot = shotSettings(decodeSettings(settingsJson))
+  if saveAsDefault then saveShotDefaults(shot) end
+  studio.shot, studio.action = shot, 'shoot'
+  studio.lastActivity = os.time()
+  return true
+end
+
+local function studioCancel()
+  if studio and not studio.action then studio.action = 'cancel' end
   return true
 end
 
@@ -615,6 +744,10 @@ local function onExtensionUnloaded()
 end
 
 M.takePhoto = takePhoto
+M.openStudio = openStudio
+M.studioPreview = studioPreview
+M.studioShoot = studioShoot
+M.studioCancel = studioCancel
 M.clearPhoto = clearPhoto
 M.hasPhoto = hasPhoto
 M.onUpdate = onUpdate
